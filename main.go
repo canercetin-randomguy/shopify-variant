@@ -10,8 +10,27 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
+
+// https://shopify.dev/api/admin-rest/2022-10/resources/product-image#post-products-product-id-images
+type CreateProductImageEndpoint struct {
+	Image CreateProductImageEndpointSRC `json:"image"`
+}
+type CreateProductImageEndpointSRC struct {
+	ID                int           `json:"id"`
+	ProductID         int           `json:"product_id"`
+	Position          int           `json:"position"`
+	CreatedAt         string        `json:"created_at"`
+	UpdatedAt         string        `json:"updated_at"`
+	Alt               interface{}   `json:"alt"`
+	Width             int           `json:"width"`
+	Height            int           `json:"height"`
+	Src               string        `json:"src"`
+	VariantIds        []interface{} `json:"variant_ids"`
+	AdminGraphqlAPIID string        `json:"admin_graphql_api_id"`
+}
 
 // ShopifyProducts is used for storing response of: https://shopify.dev/api/admin-rest/2022-10/resources/product#get-products
 type ShopifyProductsCombined []struct {
@@ -124,6 +143,7 @@ type ProductVariant struct {
 type Variant struct {
 	ImageID int    `json:"image_id"`
 	Option1 string `json:"option1"`
+	Price   string `json:"price"`
 }
 
 // {"image":{"src":"http://example.com/rails_logo.gif"}}
@@ -215,13 +235,14 @@ func RetrieveProducts() {
 		panic(err)
 	}
 }
-func (c AppCredentials) AddVariantToExisting(imageID int, varName string, productID int) (error, bool) {
+func (c AppCredentials) AddVariantToExisting(imageID int, varName string, productID int, price string) (error, bool) {
 	var ok = true
 	client := &http.Client{}
 	data := ProductVariant{
 		VariantData: Variant{
 			ImageID: imageID,
 			Option1: varName,
+			Price:   price,
 		},
 	}
 	bodyData, err := json.Marshal(data)
@@ -250,7 +271,7 @@ func (c AppCredentials) AddVariantToExisting(imageID int, varName string, produc
 	fmt.Printf("%s\n", bodyText)
 	return err, ok
 }
-func (c AppCredentials) AddImageToExisting(productID int, imageLink string) {
+func (c AppCredentials) AddImageToExisting(productID int, imageLink string) CreateProductImageEndpoint {
 	client := &http.Client{}
 	var data = ImageLink{
 		ImageLinkData: ImageLinkStr{
@@ -277,33 +298,74 @@ func (c AppCredentials) AddImageToExisting(productID int, imageLink string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	var tempResponseData CreateProductImageEndpoint
+	json.Unmarshal(bodyText, &tempResponseData)
+	return tempResponseData
+}
+func (c AppCredentials) ChangeExistingVariant(productID int) {
+	client := &http.Client{}
+	var data = strings.NewReader(`{"variant":{"id":808950810,"image_id":562641783}}`)
+	req, err := http.NewRequest("PUT", fmt.Sprintf("https://%s.myshopify.com/admin/api/2022-10/variants/%d.json", c.APIAccessToken, productID), data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("X-Shopify-Access-Token", c.APIAccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+	bodyText, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Printf("%s\n", bodyText)
 }
 func main() {
+	var loggerFile, _ = os.Create("output.log")
 	var Prods ShopifyProductsCombined
+	var log = logrus.New()
+	log.Out = loggerFile
 	productData, err := ioutil.ReadFile("products.json")
 	if err != nil {
 		panic(err)
 	}
 	json.Unmarshal(productData, &Prods)
 	var credentials = GetCredentials()
+	var variantCnt = 0
+	var testBreakForLoop = false
 	// For every product section
 	for i := range Prods {
 		// and every products
 		for j := range Prods[i].Products {
 			// iterate products twice.
-			for z := range Prods[i].Products {
-				// if both iteration product types are same, and titles arent same, add second iteration to first as a variant.
-				if strings.Contains(Prods[i].Products[j].Title, "Pet Premium Jersey") &&
-					strings.Contains(Prods[i].Products[z].Title, "Pet Premium Jersey") &&
-					(Prods[i].Products[z].Title != Prods[i].Products[j].Title) {
-					err, ok := credentials.AddVariantToExisting(Prods[i].Products[z].Image.ID, Prods[i].Products[z].Title, Prods[i].Products[j].ID)
-					if !ok {
-						log.Fatalln(err)
+			for x := range Prods {
+				for z := range Prods[x].Products {
+					// if both iteration product types are same, and titles arent same, add second iteration to first as a variant.
+					if strings.Contains(Prods[i].Products[j].Title, "Tool Box") &&
+						strings.Contains(Prods[x].Products[z].Title, "Tool Box") &&
+						(Prods[i].Products[z].Title != Prods[x].Products[j].Title) {
+						// Add image to the Prods[i].Products[j].ID, first iterations product ID.
+						// Image is downloaded from first image of the product, Prods[i].Products[z].Title, second iterations product title.
+						// Return response of adding image includes ID of uploaded image in Prods[i].Products[j].ID.
+						// TODO: Replace first variant of the product (that we started at the beginning) with the products title, default title looks ugly as fuck.
+						CreatedImageData := credentials.AddImageToExisting(Prods[i].Products[j].ID, Prods[x].Products[z].Images[0].Src)
+						err, ok := credentials.AddVariantToExisting(
+							CreatedImageData.Image.ID,
+							Prods[x].Products[z].Title, Prods[i].Products[j].ID,
+							Prods[i].Products[j].Variants[0].Price)
+						if !ok {
+							log.Fatalln(err)
+						}
+						log.Infof("Added %s title variant to %s product, this is variant %d.", Prods[x].Products[z].Title, Prods[i].Products[j].Title, variantCnt)
+						time.Sleep(500 * time.Millisecond)
 					}
 				}
 			}
-			time.Sleep(500 * time.Millisecond)
+		}
+		if testBreakForLoop {
+			break
 		}
 	}
 
